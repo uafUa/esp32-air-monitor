@@ -1,14 +1,15 @@
 use anyhow::{bail, Result};
-use embedded_graphics::mono_font::{ascii::FONT_6X10, iso_8859_1::FONT_10X20, MonoTextStyle};
 use embedded_graphics::pixelcolor::{IntoStorage, Rgb565};
 use embedded_graphics::prelude::*;
-use embedded_graphics::primitives::{PrimitiveStyleBuilder, Rectangle};
-use embedded_graphics::text::{Alignment, Text};
+use embedded_graphics::primitives::{CornerRadii, PrimitiveStyleBuilder, Rectangle, RoundedRectangle};
+use embedded_graphics::text::{Alignment, Baseline, Text, TextStyleBuilder};
 use embedded_graphics_framebuf::backends::FrameBufferBackend;
 use esp_idf_hal::gpio::{AnyIOPin, PinDriver};
+use esp_idf_hal::ledc::{self, LedcDriver, LedcTimerDriver};
 use esp_idf_hal::spi::{SpiDeviceDriver, SpiDriver};
 use std::thread;
 use std::time::Duration;
+use u8g2_fonts::{fonts, U8g2TextStyle};
 
 pub const LCD_CLK_GPIO: i32 = 1;
 pub const LCD_MOSI_GPIO: i32 = 2;
@@ -20,44 +21,32 @@ pub const LCD_BL_GPIO: i32 = 23;
 // Panel resolution (physical pixels).
 pub const LCD_W: usize = 172;
 pub const LCD_H: usize = 320;
-// Controller RAM X-offset (panel-specific; aligns drawing with visible glass).
-pub const LCD_X_GAP: u16 = 34;
+// Landscape view resolution (after hardware rotation).
+pub const LCD_VIEW_W: usize = LCD_H;
+pub const LCD_VIEW_H: usize = LCD_W;
+// Controller RAM offsets (panel-specific; align drawing with visible glass).
+pub const LCD_X_GAP: u16 = 0;
+pub const LCD_Y_GAP: u16 = 34;
 
-struct RotatedRgb565Slice<'a> {
+struct LinearRgb565Slice<'a> {
     data: &'a mut [Rgb565],
-    logical_w: usize,
-    physical_w: usize,
 }
 
-impl<'a> RotatedRgb565Slice<'a> {
-    fn new(data: &'a mut [Rgb565], logical_w: usize, physical_w: usize) -> Self {
-        Self {
-            data,
-            logical_w,
-            physical_w,
-        }
+impl<'a> LinearRgb565Slice<'a> {
+    fn new(data: &'a mut [Rgb565]) -> Self {
+        Self { data }
     }
 }
 
-impl<'a> FrameBufferBackend for RotatedRgb565Slice<'a> {
+impl<'a> FrameBufferBackend for LinearRgb565Slice<'a> {
     type Color = Rgb565;
 
     fn set(&mut self, index: usize, color: Rgb565) {
-        let x = index % self.logical_w;
-        let y = index / self.logical_w;
-        let x_p = self.physical_w - 1 - y;
-        let y_p = x;
-        let mapped = y_p * self.physical_w + x_p;
-        self.data[mapped] = color;
+        self.data[index] = color;
     }
 
     fn get(&self, index: usize) -> Rgb565 {
-        let x = index % self.logical_w;
-        let y = index / self.logical_w;
-        let x_p = self.physical_w - 1 - y;
-        let y_p = x;
-        let mapped = y_p * self.physical_w + x_p;
-        self.data[mapped]
+        self.data[index]
     }
 
     fn nr_elements(&self) -> usize {
@@ -65,32 +54,43 @@ impl<'a> FrameBufferBackend for RotatedRgb565Slice<'a> {
     }
 }
 
-pub struct Jd9853<'a> {
+pub struct Jd9853<'a, T>
+where
+    T: ledc::LedcTimer,
+{
     spi_dev: SpiDeviceDriver<'a, SpiDriver<'a>>,
     dc: PinDriver<'a, AnyIOPin, esp_idf_hal::gpio::Output>,
     rst: PinDriver<'a, AnyIOPin, esp_idf_hal::gpio::Output>,
-    bl: PinDriver<'a, AnyIOPin, esp_idf_hal::gpio::Output>,
+    bl_pwm: LedcDriver<'a>,
+    bl_timer: LedcTimerDriver<'a, T>,
     x_gap: u16,
+    y_gap: u16,
     w: u16,
     h: u16,
     txbuf: Vec<u8>,
 }
 
-impl<'a> Jd9853<'a> {
+impl<'a, T> Jd9853<'a, T>
+where
+    T: ledc::LedcTimer,
+{
     pub fn new(
         spi_dev: SpiDeviceDriver<'a, SpiDriver<'a>>,
         dc: PinDriver<'a, AnyIOPin, esp_idf_hal::gpio::Output>,
         rst: PinDriver<'a, AnyIOPin, esp_idf_hal::gpio::Output>,
-        bl: PinDriver<'a, AnyIOPin, esp_idf_hal::gpio::Output>,
+        bl_pwm: LedcDriver<'a>,
+        bl_timer: LedcTimerDriver<'a, T>,
     ) -> Result<Self> {
         let mut lcd = Self {
             spi_dev,
             dc,
             rst,
-            bl,
+            bl_pwm,
+            bl_timer,
             x_gap: LCD_X_GAP,
-            w: LCD_W as u16,
-            h: LCD_H as u16,
+            y_gap: LCD_Y_GAP,
+            w: LCD_VIEW_W as u16,
+            h: LCD_VIEW_H as u16,
             txbuf: vec![0u8; LCD_W * LCD_H * 2],
         };
 
@@ -102,12 +102,12 @@ impl<'a> Jd9853<'a> {
 
     fn reset(&mut self) -> Result<()> {
         // Reset pulse + backlight enable for this panel wiring.
-        self.bl.set_low()?;
+        self.set_backlight_pwm(0)?;
         self.rst.set_low()?;
         thread::sleep(Duration::from_millis(10));
         self.rst.set_high()?;
         thread::sleep(Duration::from_millis(120));
-        self.bl.set_high()?;
+        self.set_backlight_pwm(100)?;
         Ok(())
     }
 
@@ -170,7 +170,8 @@ impl<'a> Jd9853<'a> {
             &[0x00, 0x1D, 0x20, 0x02, 0x0E, 0x05, 0x2E, 0x25, 0x47, 0x04, 0x0C, 0x0B, 0x1D, 0x23, 0x0F],
         )?;
 
-        self.cmd(0x36, &[0x00])?; // MADCTL
+        // Rotate to landscape using MV+MX and enable BGR color order.
+        self.cmd(0x36, &[0x68])?; // MADCTL
         self.cmd(0x3A, &[0x55])?; // RGB565
 
         self.cmd(0x11, &[])?; // sleep out
@@ -186,6 +187,8 @@ impl<'a> Jd9853<'a> {
         // Apply panel X offset before setting address window.
         let x0 = x0 + self.x_gap;
         let x1 = x1 + self.x_gap;
+        let y0 = y0 + self.y_gap;
+        let y1 = y1 + self.y_gap;
 
         let caset = [(x0 >> 8) as u8, (x0 & 0xFF) as u8, (x1 >> 8) as u8, (x1 & 0xFF) as u8];
         let raset = [(y0 >> 8) as u8, (y0 & 0xFF) as u8, (y1 >> 8) as u8, (y1 & 0xFF) as u8];
@@ -207,7 +210,7 @@ impl<'a> Jd9853<'a> {
             self.txbuf.resize(need, 0);
         }
 
-        // Convert RGB565 to big-endian byte stream (most LCD controllers expect BE).
+        // Convert RGB565 to big-endian byte stream (panel expects BE).
         for (i, px) in frame.iter().copied().enumerate() {
             let raw: u16 = px.into_storage();
             self.txbuf[2 * i] = (raw >> 8) as u8;
@@ -224,80 +227,39 @@ impl<'a> Jd9853<'a> {
 
         Ok(())
     }
-}
 
-struct ScaledDrawTarget<'a, DT> {
-    target: &'a mut DT,
-    scale: i32,
-}
+    pub fn set_brightness(&mut self, percent: u8) -> Result<()> {
+        self.set_backlight_pwm(percent)?;
+        // self.set_display_brightness(percent)?;
+        Ok(())
+    }
 
-impl<'a, DT> DrawTarget for ScaledDrawTarget<'a, DT>
-where
-    DT: DrawTarget<Color = Rgb565> + OriginDimensions,
-{
-    type Color = Rgb565;
-    type Error = DT::Error;
+    fn set_backlight_pwm(&mut self, percent: u8) -> Result<()> {
+        let pct = percent.min(100) as u32;
+        let max = self.bl_pwm.get_max_duty();
+        let duty = max * pct / 100;
+        self.bl_pwm.set_duty(duty)?;
+        Ok(())
+    }
 
-    fn draw_iter<I>(&mut self, pixels: I) -> Result<(), Self::Error>
-    where
-        I: IntoIterator<Item = Pixel<Self::Color>>,
-    {
-        let scale = self.scale;
-        for Pixel(point, color) in pixels.into_iter() {
-            let x0 = point.x * scale;
-            let y0 = point.y * scale;
-            for dy in 0..scale {
-                for dx in 0..scale {
-                    self.target.draw_iter(core::iter::once(Pixel(
-                        Point::new(x0 + dx, y0 + dy),
-                        color,
-                    )))?;
-                }
-            }
-        }
+    fn set_display_brightness(&mut self, percent: u8) -> Result<()> {
+        // Enable brightness control (BCTRL) and backlight (BL) in WRCTRLD.
+        self.cmd(0x53, &[0x24])?;
+        let value = ((percent.min(100) as u16) * 255 / 100) as u8;
+        log::info!("Setting display brightness to {}% {}", percent, value);
+        self.cmd(0x51, &[value])?;
         Ok(())
     }
 }
 
-impl<DT> OriginDimensions for ScaledDrawTarget<'_, DT>
-where
-    DT: OriginDimensions,
-{
-    fn size(&self) -> Size {
-        let size = self.target.size();
-        Size::new(
-            size.width / self.scale as u32,
-            size.height / self.scale as u32,
-        )
-    }
-}
-
-fn draw_text_scaled<DT>(
-    target: &mut DT,
-    text: &str,
-    pos: Point,
-    style: MonoTextStyle<Rgb565>,
-    alignment: Alignment,
-    scale: i32,
-) -> Result<(), DT::Error>
-where
-    DT: DrawTarget<Color = Rgb565> + OriginDimensions,
-{
-    let mut scaled = ScaledDrawTarget { target, scale };
-    let pos = Point::new(pos.x / scale, pos.y / scale);
-    Text::with_alignment(text, pos, style, alignment)
-        .draw(&mut scaled)
-        .map(|_| ())
-}
-
 fn ui_cards() -> (Rectangle, Rectangle, Rectangle) {
-    let view_w = LCD_H;
-    let view_h = LCD_W;
-    let pad = 10i32;
-    let gap = 6i32;
+    let view_w = LCD_VIEW_W;
+    let view_h = LCD_VIEW_H;
+    let pad = 14i32;
+    let gap = 10i32;
     let content_w = view_w as i32 - 2 * pad;
     let content_h = view_h as i32 - 2 * pad;
-    let left_w = (content_w - gap) / 2;
+    let left_w = (content_w * 58) / 100;
     let right_w = content_w - left_w - gap;
     let right_h = (content_h - gap) / 2;
 
@@ -326,107 +288,99 @@ pub fn render_ui_mock1(
     co2_ppm: u16,
     zero_mode: bool,
 ) -> Result<()> {
-    let view_w = LCD_H;
-    let view_h = LCD_W;
-    let backend = RotatedRgb565Slice::new(frame, view_w, LCD_W);
+    let view_w = LCD_VIEW_W;
+    let view_h = LCD_VIEW_H;
+    let backend = LinearRgb565Slice::new(frame);
     let mut fb = embedded_graphics_framebuf::FrameBuf::<Rgb565, _>::new(backend, view_w, view_h);
 
-    let bg = Rgb565::new(1, 2, 4);
-    let frame_color = Rgb565::new(9, 11, 14);
-    let card_fill = Rgb565::new(2, 3, 5);
-    let card_stroke = Rgb565::new(5, 6, 8);
+    let bg = Rgb565::new(0, 0, 0);
+    let frame_color = Rgb565::new(16, 32, 16);
+    let card_stroke = Rgb565::new(3, 8, 5);
 
-    let label_color = Rgb565::new(18, 20, 22);
-    let co2_color = Rgb565::new(0, 47, 31);
-    let temp_color = Rgb565::new(31, 19, 0);
-    let hum_color = Rgb565::new(8, 24, 31);
-    let ok_color = Rgb565::new(0, 45, 12);
+    let label_color = Rgb565::new(31, 63, 33);
+    let co2_color = Rgb565::new(0, 63, 31);
+    let temp_color = Rgb565::new(31, 32, 0);
+    let hum_color = Rgb565::new(0, 32, 31);
+    let ok_color = Rgb565::new(0, 63, 0);
 
     fb.clear(bg)?;
 
     let frame_style = PrimitiveStyleBuilder::new()
         .stroke_color(frame_color)
-        .stroke_width(2)
+        .stroke_width(3)
         .build();
     let card_style = PrimitiveStyleBuilder::new()
         .stroke_color(card_stroke)
         .stroke_width(2)
-        .fill_color(card_fill)
+        .fill_color(card_stroke)
         .build();
 
     let frame_rect = Rectangle::new(
         Point::new(4, 4),
         Size::new((view_w - 8) as u32, (view_h - 8) as u32),
     );
-    frame_rect.into_styled(frame_style).draw(&mut fb)?;
+    let frame_round = RoundedRectangle::with_equal_corners(frame_rect, Size::new(12, 12));
+    frame_round.into_styled(frame_style).draw(&mut fb)?;
 
-    let (left, right_top, right_bottom) = ui_cards();
-    let right_h = right_top.size.height as i32;
+    let (panel_co, panel_temp, panel_hum) = ui_cards();
 
-    left.into_styled(card_style).draw(&mut fb)?;
-    right_top.into_styled(card_style).draw(&mut fb)?;
-    right_bottom.into_styled(card_style).draw(&mut fb)?;
+    let card_radii = CornerRadii::new(Size::new(10, 10));
+    RoundedRectangle::new(panel_co, card_radii).into_styled(card_style).draw(&mut fb)?;
+    RoundedRectangle::new(panel_temp, card_radii).into_styled(card_style).draw(&mut fb)?;
+    RoundedRectangle::new(panel_hum, card_radii).into_styled(card_style).draw(&mut fb)?;
 
-    let label = MonoTextStyle::new(&FONT_6X10, label_color);
-    let co2_value = MonoTextStyle::new(&FONT_10X20, co2_color);
-    let temp_value = MonoTextStyle::new(&FONT_10X20, temp_color);
-    let hum_value = MonoTextStyle::new(&FONT_10X20, hum_color);
-    let status = MonoTextStyle::new(&FONT_6X10, ok_color);
-    let value_scale = 2;
-    let value_height = (FONT_10X20.character_size.height as i32) * value_scale;
+    let style_label = U8g2TextStyle::new(fonts::u8g2_font_helvR10_tf, label_color);
+    let style_co2_value = U8g2TextStyle::new(fonts::u8g2_font_fub35_tf, co2_color);
+    let style_temp_value = U8g2TextStyle::new(fonts::u8g2_font_helvB24_tf, temp_color);
+    let style_hum_value = U8g2TextStyle::new(fonts::u8g2_font_helvB24_tf, hum_color);
+    let style_status = U8g2TextStyle::new(fonts::u8g2_font_helvB12_tf, ok_color);
+    let center_text = TextStyleBuilder::new()
+        .alignment(Alignment::Center)
+        .baseline(Baseline::Middle)
+        .build();
 
-    let left_center_x = left.center().x;
-    let left_top = left.top_left;
-    let left_h = left.size.height as i32;
-    let co2_val_y = left_top.y + left_h / 2 - value_height / 2;
-    let ppm_y = co2_val_y + value_height + 6;
-    let status_y = ppm_y + 18;
+    let left_center_x = panel_co.center().x;
+    let left_top = panel_co.top_left;
+    let left_h = panel_co.size.height as i32;
+    let co2_val_y = left_top.y + (left_h * 40) / 100;
+    let ppm_y = left_top.y + (left_h * 68) / 100;
+    let status_y = left_top.y + (left_h * 82) / 100;
 
     if zero_mode {
-        draw_text_scaled(
-            &mut fb,
-            "ZERO",
-            Point::new(left_center_x, co2_val_y),
-            co2_value,
-            Alignment::Center,
-            value_scale,
-        )?;
+        Text::with_text_style("ZERO", Point::new(left_center_x, co2_val_y), style_co2_value, center_text)
+            .draw(&mut fb)?;
     } else {
-        draw_text_scaled(
-            &mut fb,
+        Text::with_text_style(
             &format!("{}", co2_ppm),
             Point::new(left_center_x, co2_val_y),
-            co2_value,
-            Alignment::Center,
-            value_scale,
-        )?;
-        Text::with_alignment("ppm", Point::new(left_center_x, ppm_y), label, Alignment::Center).draw(&mut fb)?;
-        Text::with_alignment("Good", Point::new(left_center_x, status_y), status, Alignment::Center).draw(&mut fb)?;
+            style_co2_value,
+            center_text,
+        )
+        .draw(&mut fb)?;
+        Text::with_text_style("ppm", Point::new(left_center_x, ppm_y), style_label, center_text).draw(&mut fb)?;
+        Text::with_text_style("Good", Point::new(left_center_x, status_y), style_status, center_text)
+            .draw(&mut fb)?;
     }
 
-    let rt_center_x = right_top.center().x;
-    let rt_top = right_top.top_left;
-    let temp_val_y = rt_top.y + right_h / 2 - value_height / 2;
-    draw_text_scaled(
-        &mut fb,
+    let rt_center_x = panel_temp.center().x;
+    let rt_center_y = panel_temp.center().y;
+    Text::with_text_style(
         &format!("{:.1}°C", temperature_c),
-        Point::new(rt_center_x, temp_val_y),
-        temp_value,
-        Alignment::Center,
-        value_scale,
-    )?;
+        Point::new(rt_center_x, rt_center_y),
+        style_temp_value,
+        center_text,
+    )
+    .draw(&mut fb)?;
 
-    let rb_center_x = right_bottom.center().x;
-    let rb_top = right_bottom.top_left;
-    let hum_val_y = rb_top.y + right_h / 2 - value_height / 2;
-    draw_text_scaled(
-        &mut fb,
+    let rb_center_x = panel_hum.center().x;
+    let rb_center_y = panel_hum.center().y;
+    Text::with_text_style(
         &format!("{}%", humidity_pct),
-        Point::new(rb_center_x, hum_val_y),
-        hum_value,
-        Alignment::Center,
-        value_scale,
-    )?;
+        Point::new(rb_center_x, rb_center_y),
+        style_hum_value,
+        center_text,
+    )
+    .draw(&mut fb)?;
 
     Ok(())
 }

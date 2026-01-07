@@ -14,12 +14,14 @@ use embedded_graphics::geometry::Point;
 use embedded_graphics::pixelcolor::{Rgb565, RgbColor};
 use esp_idf_hal::gpio::{AnyIOPin, PinDriver};
 use esp_idf_hal::i2c::{I2cConfig, I2cDriver};
+use esp_idf_hal::ledc::config::TimerConfig as LedcTimerConfig;
+use esp_idf_hal::ledc::{LedcDriver, LedcTimerDriver};
 use esp_idf_hal::prelude::*;
 use esp_idf_hal::spi::config::{Config as SpiDeviceConfig, DriverConfig as SpiDriverConfig};
 use esp_idf_hal::spi::{SpiDeviceDriver, SpiDriver};
 use esp_idf_hal::uart::{UartConfig, UartDriver};
 use esp_idf_svc::log::{set_target_level, EspLogger};
-use log::{debug, error, info, LevelFilter};
+use log::{error, info, LevelFilter};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -88,12 +90,17 @@ fn main() -> Result<()> {
         &spi_dev_cfg,
     )?;
 
-    // LCD control pins: D/C, RESET, Backlight.
+    // LCD control pins: D/C, RESET. Backlight uses PWM on GPIO23.
     let dc = PinDriver::output(AnyIOPin::from(pins.gpio15))?;
     let rst = PinDriver::output(AnyIOPin::from(pins.gpio22))?;
-    let bl = PinDriver::output(AnyIOPin::from(pins.gpio23))?;
+    let bl_timer = LedcTimerDriver::new(
+        peripherals.ledc.timer0,
+        &LedcTimerConfig::default().frequency(5.kHz().into()),
+    )?;
+    let bl_pwm = LedcDriver::new(peripherals.ledc.channel0, &bl_timer, pins.gpio23)?;
 
-    let mut lcd = Jd9853::new(spi_dev, dc, rst, bl)?;
+    let mut lcd = Jd9853::new(spi_dev, dc, rst, bl_pwm, bl_timer)?;
+    lcd.set_brightness(10)?;
 
     // ---- Framebuffer ----
     let mut frame: Vec<Rgb565> = vec![Rgb565::BLACK; LCD_W * LCD_H];
