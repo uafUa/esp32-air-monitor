@@ -8,3 +8,7 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=8000
 # Workaround for https://github.com/espressif/esp-idf/issues/7631
 #CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=n
 #CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=n
+
+# Allow debug logs (per-target filtering done at runtime).
+CONFIG_LOG_MAXIMUM_LEVEL=4
+CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y
