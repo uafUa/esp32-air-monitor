@@ -1,7 +1,8 @@
 pub mod dht {
     use anyhow::Result;
     use esp_idf_hal::delay::Ets;
-    use esp_idf_hal::gpio::{AnyIOPin, InputOutput, PinDriver, Pull};
+    use esp_idf_hal::gpio::{InputPin, InputOutput, OutputPin, PinDriver, Pull};
+    use esp_idf_hal::peripheral::Peripheral;
     use esp_idf_sys as sys;
 
     // DHT22 data line GPIO. Must have a pull-up (internal or external ~4.7k).
@@ -20,13 +21,19 @@ pub mod dht {
         Gpio(esp_idf_hal::sys::EspError),
     }
 
-    pub struct Dht22Sensor<'a> {
-        pin: PinDriver<'a, AnyIOPin, InputOutput>,
+    pub struct Dht22Sensor<'a, P>
+    where
+        P: InputPin + OutputPin,
+    {
+        pin: PinDriver<'a, P, InputOutput>,
     }
 
-    impl<'a> Dht22Sensor<'a> {
+    impl<'a, P> Dht22Sensor<'a, P>
+    where
+        P: InputPin + OutputPin,
+    {
         // DHT22 requires open-drain I/O with pull-up; we drive low and release high.
-        pub fn new(mut pin: PinDriver<'a, AnyIOPin, InputOutput>) -> Result<Self> {
+        pub fn new(mut pin: PinDriver<'a, P, InputOutput>) -> Result<Self> {
             pin.set_pull(Pull::Up)?;
             pin.set_high()?;
             Ok(Self { pin })
@@ -101,6 +108,16 @@ pub mod dht {
         }
     }
 
+    pub fn init_dht22<'d, P>(
+        pin: impl Peripheral<P = P> + 'd,
+    ) -> Result<Dht22Sensor<'d, P>>
+    where
+        P: InputPin + OutputPin,
+    {
+        let dht_pin = PinDriver::input_output_od(pin)?;
+        Dht22Sensor::new(dht_pin)
+    }
+
     // ESP timer in microseconds for tight pulse timing.
     fn now_us() -> i64 {
         unsafe { sys::esp_timer_get_time() }
@@ -111,6 +128,10 @@ pub mod mhz19b {
     use core::fmt;
     use esp_idf_hal::delay::{TickType, BLOCK};
     use esp_idf_hal::uart::UartDriver;
+    use esp_idf_hal::gpio::{InputPin, OutputPin};
+    use esp_idf_hal::peripheral::Peripheral;
+    use esp_idf_hal::uart::UartConfig;
+    use esp_idf_hal::prelude::*;
     use std::time::{Duration, Instant};
 
     pub const MHZ19B_BAUD: u32 = 9_600;
@@ -206,6 +227,25 @@ pub mod mhz19b {
 
             Ok(buf)
         }
+    }
+
+    pub fn init_mhz19b<'d>(
+        uart: impl Peripheral<P = esp_idf_hal::uart::UART0> + 'd,
+        tx: impl Peripheral<P = impl OutputPin> + 'd,
+        rx: impl Peripheral<P = impl InputPin> + 'd,
+    ) -> Result<Mhz19b<'d>, MhzError> {
+        let uart_cfg = UartConfig::new().baudrate(MHZ19B_BAUD.Hz());
+        let uart = UartDriver::new(
+            uart,
+            tx,
+            rx,
+            None::<esp_idf_hal::gpio::AnyIOPin>,
+            None::<esp_idf_hal::gpio::AnyIOPin>,
+            &uart_cfg,
+        )
+        .map_err(MhzError::Uart)?;
+
+        Ok(Mhz19b::new(uart))
     }
 
     fn checksum(bytes: &[u8]) -> u8 {

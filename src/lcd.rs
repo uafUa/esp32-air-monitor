@@ -6,17 +6,21 @@ use embedded_graphics::text::{Alignment, Baseline, Text, TextStyleBuilder};
 use embedded_graphics_framebuf::backends::FrameBufferBackend;
 use esp_idf_hal::gpio::{AnyIOPin, PinDriver};
 use esp_idf_hal::ledc::{self, LedcDriver, LedcTimerDriver};
+use esp_idf_hal::ledc::config::TimerConfig as LedcTimerConfig;
+use esp_idf_hal::peripheral::Peripheral;
+use esp_idf_hal::prelude::*;
 use esp_idf_hal::spi::{SpiDeviceDriver, SpiDriver};
+use esp_idf_hal::spi::config::{Config as SpiDeviceConfig, DriverConfig as SpiDriverConfig};
 use std::thread;
 use std::time::Duration;
 use u8g2_fonts::{fonts, U8g2TextStyle};
 
-pub const LCD_CLK_GPIO: i32 = 1;
-pub const LCD_MOSI_GPIO: i32 = 2;
-pub const LCD_CS_GPIO: i32 = 14;
-pub const LCD_DC_GPIO: i32 = 15;
-pub const LCD_RST_GPIO: i32 = 22;
-pub const LCD_BL_GPIO: i32 = 23;
+pub const LCD_CLK_GPIO: i32 = 1;   // SPI CLK (Clock)
+pub const LCD_MOSI_GPIO: i32 = 2;  // SPI MOSI (Master Out, Slave In)
+pub const LCD_CS_GPIO: i32 = 14;   // SPI CS (Chip Select)
+pub const LCD_DC_GPIO: i32 = 15;   // Data/Command control
+pub const LCD_RST_GPIO: i32 = 22;  // Reset
+pub const LCD_BL_GPIO: i32 = 23;   // Backlight PWM
 
 // Panel resolution (physical pixels).
 pub const LCD_W: usize = 172;
@@ -54,7 +58,7 @@ impl<'a> FrameBufferBackend for LinearRgb565Slice<'a> {
     }
 }
 
-pub struct Jd9853<'a, T>
+pub struct St7789<'a, T>
 where
     T: ledc::LedcTimer,
 {
@@ -70,7 +74,7 @@ where
     txbuf: Vec<u8>,
 }
 
-impl<'a, T> Jd9853<'a, T>
+impl<'a, T> St7789<'a, T>
 where
     T: ledc::LedcTimer,
 {
@@ -230,7 +234,7 @@ where
 
     pub fn set_brightness(&mut self, percent: u8) -> Result<()> {
         self.set_backlight_pwm(percent)?;
-        // self.set_display_brightness(percent)?;
+        self.set_display_brightness(percent)?;
         Ok(())
     }
 
@@ -250,6 +254,42 @@ where
         self.cmd(0x51, &[value])?;
         Ok(())
     }
+}
+
+pub fn init_lcd(
+    spi: impl Peripheral<P = esp_idf_hal::spi::SPI2> + 'static,
+    ledc: esp_idf_hal::ledc::LEDC,
+    sclk: AnyIOPin,
+    mosi: AnyIOPin,
+    cs: AnyIOPin,
+    dc: AnyIOPin,
+    rst: AnyIOPin,
+    bl: AnyIOPin,
+) -> Result<St7789<'static, ledc::TIMER0>> {
+    let spi_driver_cfg = SpiDriverConfig::new();
+    let spi_dev_cfg = SpiDeviceConfig::new().baudrate(40.MHz().into());
+
+    let spi_driver = SpiDriver::new(
+        spi,
+        sclk,
+        mosi,
+        Option::<AnyIOPin>::None,
+        &spi_driver_cfg,
+    )?;
+
+    let spi_dev = SpiDeviceDriver::new(spi_driver, Some(cs), &spi_dev_cfg)?;
+
+    let dc = PinDriver::output(dc)?;
+    let rst = PinDriver::output(rst)?;
+    let bl_timer = LedcTimerDriver::new(
+        ledc.timer0,
+        &LedcTimerConfig::default().frequency(5.kHz().into()),
+    )?;
+    let bl_pwm = LedcDriver::new(ledc.channel0, &bl_timer, bl)?;
+
+    let mut lcd = St7789::new(spi_dev, dc, rst, bl_pwm, bl_timer)?;
+    lcd.set_brightness(10)?;
+    Ok(lcd)
 }
 
 fn ui_cards() -> (Rectangle, Rectangle, Rectangle) {

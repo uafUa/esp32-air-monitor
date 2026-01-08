@@ -1,5 +1,8 @@
 use anyhow::Result;
-use esp_idf_hal::i2c::I2cDriver;
+use esp_idf_hal::gpio::{InputPin, OutputPin};
+use esp_idf_hal::i2c::{I2cConfig, I2cDriver};
+use esp_idf_hal::prelude::*;
+use esp_idf_hal::i2c::I2c;
 use esp_idf_sys as sys;
 use log::{error, info};
 use std::thread;
@@ -60,6 +63,24 @@ pub fn i2c_scan(i2c: &mut I2cDriver<'_>) {
     if found == 0 {
         error!("No I2C devices found (wrong pins / no pullups / power gating)");
     }
+}
+
+pub fn init_i2c<'d, I2C: I2c>(
+    i2c: impl esp_idf_hal::peripheral::Peripheral<P = I2C> + 'd,
+    sda: impl esp_idf_hal::peripheral::Peripheral<P = impl InputPin + OutputPin> + 'd,
+    scl: impl esp_idf_hal::peripheral::Peripheral<P = impl InputPin + OutputPin> + 'd,
+) -> Result<I2cDriver<'d>> {
+    gpio_setup_touch_lines();
+    touch_reset_pulse();
+
+    let i2c_cfg = I2cConfig::new().baudrate(100.kHz().into());
+    let mut driver = I2cDriver::new(i2c, sda, scl, &i2c_cfg)?;
+    i2c_scan(&mut driver);
+    if let Err(e) = probe_touch(&mut driver) {
+        error!("Touch probe failed: {:?}", e);
+    }
+
+    Ok(driver)
 }
 
 fn read_reg_no_restart(i2c: &mut I2cDriver<'_>, reg: u8, out: &mut [u8]) -> HalResult<()> {
