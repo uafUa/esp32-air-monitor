@@ -1,19 +1,19 @@
 #![allow(clippy::needless_return)]
 
-mod lcd;
+mod board;
+mod display;
+mod st7789;
 mod sensors;
 mod touch;
 
-use crate::lcd::{co2_card_rect, init_lcd, render_ui_mock1, LCD_H, LCD_W};
-use crate::sensors::dht::init_dht22;
-use crate::sensors::mhz19b::init_mhz19b;
-use crate::touch::{init_i2c, read_touch};
+use crate::board::Board;
+use crate::display::{co2_card_rect, render_ui_mock1};
+use crate::st7789::{LCD_H, LCD_W};
+use crate::touch::read_touch;
 
 use anyhow::Result;
 use embedded_graphics::geometry::Point;
 use embedded_graphics::pixelcolor::{Rgb565, RgbColor};
-use esp_idf_hal::gpio::AnyIOPin;
-use esp_idf_hal::prelude::*;
 use esp_idf_svc::log::{set_target_level, EspLogger};
 use log::{error, LevelFilter};
 use std::thread;
@@ -30,28 +30,12 @@ fn main() -> Result<()> {
     set_target_level("c6_demo", LevelFilter::Debug)?;
     set_target_level("c6_demo::sensors", LevelFilter::Debug)?;
 
-    let Peripherals {
-        pins,
-        i2c0,
-        uart0,
-        spi2,
-        ledc,
-        ..
-    } = Peripherals::take()?;
-
-    let mut i2c = init_i2c(i2c0, pins.gpio18, pins.gpio19)?;
-    let mut dht22 = init_dht22(pins.gpio4)?;
-    let mut mhz19b = init_mhz19b(uart0, pins.gpio16, pins.gpio17)?;
-    let mut lcd = init_lcd(
-        spi2,
-        ledc,
-        AnyIOPin::from(pins.gpio1),
-        AnyIOPin::from(pins.gpio2),
-        AnyIOPin::from(pins.gpio14),
-        AnyIOPin::from(pins.gpio15),
-        AnyIOPin::from(pins.gpio22),
-        AnyIOPin::from(pins.gpio23),
-    )?;
+    let Board {
+        mut lcd,
+        mut i2c,
+        mut dht22,
+        mut mhz19b,
+    } = Board::init()?;
     let dht_interval = Duration::from_millis(2000);
     let mut last_dht_read = Instant::now() - dht_interval;
     let mhz_interval = Duration::from_millis(5000);
@@ -71,8 +55,24 @@ fn main() -> Result<()> {
     let mut co2_hold_start: Option<Instant> = None;
     let mut co2_hold_triggered = false;
     let mut zero_feedback_until: Option<Instant> = None;
+    const DISPLAY_OFF_TIMEOUT: Duration = Duration::from_secs(5); // timeout aftter which displays starts reducing brightness
+    const DISPLAY_OFF_DURATION: Duration = Duration::from_secs(2); // duration for which display reduces brightness
+    const DEFAULT_BRIGHTNESS: u8 = 10;
+    const SLEEP_INTERFVAL: Duration = Duration::from_millis(200);
+    lcd.set_brightness(100)?;
+    let mut last_touch = Instant::now();
+    let dimming_step: u8 = 1; // brightness change step during dimming/brightening
+    let mut dimming_in_progress = false;
+    let mut dimmed_brightness : u8 = DEFAULT_BRIGHTNESS; // current dimmed brightness level (if display dimming in progress)
+
 
     loop {
+
+        if dimming_in_progress && dimmed_brightness > 0 {
+            dimmed_brightness -= dimming_step;
+            lcd.set_brightness(dimmed_brightness)?;
+        }
+
         if last_dht_read.elapsed() >= dht_interval {
             match dht22.read() {
                 Ok(reading) => {
@@ -99,6 +99,15 @@ fn main() -> Result<()> {
         let touch_in_co2 = 
         match read_touch(&mut i2c) {
             Ok(Some((x, y))) => {
+                // cancel display dimming/brightening if touch detected
+                if dimming_in_progress {
+                    log::info!("Touch detected - restoring brightness to {}%", DEFAULT_BRIGHTNESS);
+                    dimming_in_progress = false;
+                    lcd.set_brightness(DEFAULT_BRIGHTNESS)?;
+                    dimmed_brightness = DEFAULT_BRIGHTNESS;
+                }
+                last_touch = Instant::now();
+
                 let pt = touch_to_view(x, y);
                 co2_rect.contains(pt)
             }
@@ -132,11 +141,17 @@ fn main() -> Result<()> {
             co2_hold_triggered = false;
         }
 
-        let zero_mode = zero_feedback_until.is_some();
-        render_ui_mock1(&mut frame, temperature_c, humidity_pct, co2, zero_mode)?;
-        lcd.flush_full(&frame)?;
+        if last_touch.elapsed() >= DISPLAY_OFF_TIMEOUT && !dimming_in_progress {
+            dimming_in_progress = true;
+        }
 
-        thread::sleep(Duration::from_millis(200));
+        if dimmed_brightness != 0 {
+            let zero_mode = zero_feedback_until.is_some();
+            render_ui_mock1(&mut frame, temperature_c, humidity_pct, co2, zero_mode)?;
+            lcd.flush_full(&frame)?;
+        }
+
+        thread::sleep(SLEEP_INTERFVAL);
     }
 }
 
