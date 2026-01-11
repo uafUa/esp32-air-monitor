@@ -2,8 +2,9 @@
 
 mod board;
 mod display;
+mod sht31;
 mod st7789;
-mod sensors;
+mod mhz19b;
 mod touch;
 
 use crate::board::Board;
@@ -28,16 +29,15 @@ fn main() -> Result<()> {
     // will share the line with the sensor. Disable logs if that causes issues.
     log::set_max_level(LevelFilter::Debug);
     set_target_level("c6_demo", LevelFilter::Debug)?;
-    set_target_level("c6_demo::sensors", LevelFilter::Debug)?;
 
     let Board {
         mut lcd,
         mut i2c,
-        mut dht22,
         mut mhz19b,
+        sht31,
     } = Board::init()?;
-    let dht_interval = Duration::from_millis(2000);
-    let mut last_dht_read = Instant::now() - dht_interval;
+    let env_interval = Duration::from_millis(2000);
+    let mut last_env_read = Instant::now() - env_interval;
     let mhz_interval = Duration::from_millis(5000);
     let mut last_mhz_read = Instant::now() - mhz_interval;
 
@@ -73,17 +73,17 @@ fn main() -> Result<()> {
             lcd.set_brightness(dimmed_brightness)?;
         }
 
-        if last_dht_read.elapsed() >= dht_interval {
-            match dht22.read() {
+        if last_env_read.elapsed() >= env_interval {
+            match sht31.read(&mut i2c) {
                 Ok(reading) => {
                     temperature_c = reading.temperature_c;
                     humidity_pct = reading.humidity_pct.clamp(0.0, 100.0).round() as u8;
                 }
                 Err(err) => {
-                    error!("DHT22 read error: {:?}", err);
+                    error!("SHT31 read error: {:?}", err);
                 }
             }
-            last_dht_read = Instant::now();
+            last_env_read = Instant::now();
         }
 
         if last_mhz_read.elapsed() >= mhz_interval {

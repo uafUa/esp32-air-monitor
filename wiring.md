@@ -39,3 +39,20 @@ Notes:
 - If your MH-Z19B RX truly requires 5V logic, use a proper level shifter to
   translate 3.3V -> 5V (a divider would lower the level too much).
 - If you use different GPIOs for UART, update the UART pin mapping in code.
+
+## SHT31 (I2C on GPIO18/19)
+
+SHT31 uses I2C and can share the same bus as the touch controller.
+
+```
+ESP32-C6         SHT31
+3V3   ---------> VCC
+GND   ---------> GND
+GPIO18 --------> SDA
+GPIO19 --------> SCL
+```
+
+Notes:
+- Default I2C address is 0x44 (ADDR tied to GND). If ADDR is tied to VCC, the address is 0x45.
+- The touch controller already uses I2C on GPIO18/19; sharing the bus is fine.
+- If your SHT31 board has no pull-ups, add 4.7k-10k resistors from SDA/SCL to 3V3.
