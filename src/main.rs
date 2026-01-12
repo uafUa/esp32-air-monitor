@@ -1,6 +1,7 @@
 #![allow(clippy::needless_return)]
 
 mod board;
+mod battery;
 mod display;
 mod sht31;
 mod st7789;
@@ -10,7 +11,7 @@ mod touch;
 use crate::board::Board;
 use crate::display::{co2_card_rect, render_ui_mock1};
 use crate::st7789::{LCD_H, LCD_W};
-use crate::touch::read_touch;
+use crate::touch::{read_touch, touch_take_pending};
 
 use anyhow::Result;
 use embedded_graphics::geometry::Point;
@@ -27,27 +28,37 @@ fn main() -> Result<()> {
     EspLogger::initialize_default();
     // Note: UART0 TX/RX are used for MH-Z19B on this board; logging over UART0
     // will share the line with the sensor. Disable logs if that causes issues.
-    log::set_max_level(LevelFilter::Debug);
-    set_target_level("c6_demo", LevelFilter::Debug)?;
+    let log_level = if cfg!(debug_assertions) {
+        LevelFilter::Debug
+    } else {
+        LevelFilter::Off
+    };
+    log::set_max_level(log_level);
+    set_target_level("c6_demo", log_level)?;
 
     let Board {
         mut lcd,
         mut i2c,
         mut mhz19b,
+        mut battery,
         sht31,
     } = Board::init()?;
     let env_interval = Duration::from_millis(2000);
     let mut last_env_read = Instant::now() - env_interval;
     let mhz_interval = Duration::from_millis(5000);
     let mut last_mhz_read = Instant::now() - mhz_interval;
+    let battery_interval = Duration::from_millis(10000);
+    let mut last_battery_read = Instant::now() - battery_interval;
 
     // ---- Framebuffer ----
     let mut frame: Vec<Rgb565> = vec![Rgb565::BLACK; LCD_W * LCD_H];
 
-    // Live sensor readings + fallback animated CO2 value
+    // Live sensor readings.
     let mut temperature_c: f32 = 21.6;
     let mut humidity_pct: u8 = 45;
-    let mut co2: u16 = 840;
+    let mut co2_value: Option<u16> = None;
+    let mut co2_error = false;
+    let mut battery_v: Option<f32> = None;
 
     let co2_rect = co2_card_rect();
     let hold_duration = Duration::from_secs(2);
@@ -59,25 +70,43 @@ fn main() -> Result<()> {
     const DISPLAY_OFF_DURATION: Duration = Duration::from_secs(2); // duration for which display reduces brightness
     const DEFAULT_BRIGHTNESS: u8 = 10;
     const SLEEP_INTERFVAL: Duration = Duration::from_millis(200);
-    lcd.set_brightness(100)?;
+    lcd.set_brightness(DEFAULT_BRIGHTNESS)?;
     let mut last_touch = Instant::now();
-    let dimming_step: u8 = 1; // brightness change step during dimming/brightening
+    let dimming_steps =
+        (DISPLAY_OFF_DURATION.as_millis() / SLEEP_INTERFVAL.as_millis()).max(1) as u32;
+    let dimming_step =
+        ((DEFAULT_BRIGHTNESS as u32 + dimming_steps - 1) / dimming_steps) as u8;
     let mut dimming_in_progress = false;
-    let mut dimmed_brightness : u8 = DEFAULT_BRIGHTNESS; // current dimmed brightness level (if display dimming in progress)
-
-
+    let mut dimmed_brightness: u8 = DEFAULT_BRIGHTNESS;
+    let mut render_needed = true;
+    let mut last_temp_display = (temperature_c * 10.0).round() as i32;
+    let mut last_humidity_display = humidity_pct;
+    let mut last_co2_display: Option<u16> = None;
+    let mut last_co2_error = false;
+    let mut last_zero_mode = false;
+    let mut last_battery_display: Option<i32> = None;
+    let mut touch_active = false;
     loop {
 
         if dimming_in_progress && dimmed_brightness > 0 {
-            dimmed_brightness -= dimming_step;
+            dimmed_brightness = dimmed_brightness.saturating_sub(dimming_step);
             lcd.set_brightness(dimmed_brightness)?;
         }
 
         if last_env_read.elapsed() >= env_interval {
             match sht31.read(&mut i2c) {
                 Ok(reading) => {
-                    temperature_c = reading.temperature_c;
-                    humidity_pct = reading.humidity_pct.clamp(0.0, 100.0).round() as u8;
+                    let new_temp = reading.temperature_c;
+                    let new_humidity = reading.humidity_pct.clamp(0.0, 100.0).round() as u8;
+                    let new_temp_display = (new_temp * 10.0).round() as i32;
+                    if new_temp_display != last_temp_display || new_humidity != last_humidity_display
+                    {
+                        render_needed = true;
+                        last_temp_display = new_temp_display;
+                        last_humidity_display = new_humidity;
+                    }
+                    temperature_c = new_temp;
+                    humidity_pct = new_humidity;
                 }
                 Err(err) => {
                     error!("SHT31 read error: {:?}", err);
@@ -89,30 +118,78 @@ fn main() -> Result<()> {
         if last_mhz_read.elapsed() >= mhz_interval {
             match mhz19b.read_ppm_with_frame(2000) {
                 Ok((ppm, _frame)) => {
-                    co2 = ppm;
+                    if last_co2_display != Some(ppm) || last_co2_error {
+                        render_needed = true;
+                        last_co2_display = Some(ppm);
+                        last_co2_error = false;
+                    }
+                    co2_value = Some(ppm);
+                    co2_error = false;
                 }
-                Err(err) => error!("MH-Z19B read error: {:?}", err),
+                Err(err) => {
+                    error!("MH-Z19B read error: {:?}", err);
+                    if !last_co2_error || last_co2_display.is_some() {
+                        render_needed = true;
+                        last_co2_display = None;
+                        last_co2_error = true;
+                    }
+                    co2_value = None;
+                    co2_error = true;
+                }
             }
             last_mhz_read = Instant::now();
         }
 
-        let touch_in_co2 = 
-        match read_touch(&mut i2c) {
-            Ok(Some((x, y))) => {
-                // cancel display dimming/brightening if touch detected
-                if dimming_in_progress {
-                    log::info!("Touch detected - restoring brightness to {}%", DEFAULT_BRIGHTNESS);
-                    dimming_in_progress = false;
-                    lcd.set_brightness(DEFAULT_BRIGHTNESS)?;
-                    dimmed_brightness = DEFAULT_BRIGHTNESS;
+        if last_battery_read.elapsed() >= battery_interval {
+            match battery.read_voltage() {
+                Ok(voltage) => {
+                    let display_cv = (voltage * 100.0).round() as i32;
+                    if last_battery_display != Some(display_cv) {
+                        render_needed = true;
+                        last_battery_display = Some(display_cv);
+                    }
+                    battery_v = Some(voltage);
                 }
-                last_touch = Instant::now();
-
-                let pt = touch_to_view(x, y);
-                co2_rect.contains(pt)
+                Err(err) => error!("Battery read error: {:?}", err),
             }
-            Ok(None) => { false } 
-            Err(_) => { false }
+            last_battery_read = Instant::now();
+        }
+
+        let irq_pending = touch_take_pending();
+        let should_read_touch = irq_pending || touch_active;
+        let touch_in_co2 = if should_read_touch {
+            match read_touch(&mut i2c) {
+                Ok(Some((x, y))) => {
+                    touch_active = true;
+                    // cancel display dimming/brightening if touch detected
+                    if dimming_in_progress {
+                        log::info!(
+                            "Touch detected - restoring brightness to {}%",
+                            DEFAULT_BRIGHTNESS
+                        );
+                        dimming_in_progress = false;
+                        if dimmed_brightness == 0 {
+                            render_needed = true;
+                        }
+                        lcd.set_brightness(DEFAULT_BRIGHTNESS)?;
+                        dimmed_brightness = DEFAULT_BRIGHTNESS;
+                    }
+                    last_touch = Instant::now();
+
+                    let pt = touch_to_view(x, y);
+                    co2_rect.contains(pt)
+                }
+                Ok(None) => {
+                    touch_active = false;
+                    false
+                }
+                Err(_) => {
+                    touch_active = false;
+                    false
+                }
+            }
+        } else {
+            false
         };
 
         if let Some(until) = zero_feedback_until {
@@ -145,10 +222,24 @@ fn main() -> Result<()> {
             dimming_in_progress = true;
         }
 
-        if dimmed_brightness != 0 {
-            let zero_mode = zero_feedback_until.is_some();
-            render_ui_mock1(&mut frame, temperature_c, humidity_pct, co2, zero_mode)?;
+        let zero_mode = zero_feedback_until.is_some();
+        if zero_mode != last_zero_mode {
+            render_needed = true;
+            last_zero_mode = zero_mode;
+        }
+
+        if dimmed_brightness != 0 && render_needed {
+            render_ui_mock1(
+                &mut frame,
+                temperature_c,
+                humidity_pct,
+                co2_value,
+                co2_error,
+                zero_mode,
+                battery_v,
+            )?;
             lcd.flush_full(&frame)?;
+            render_needed = false;
         }
 
         thread::sleep(SLEEP_INTERFVAL);

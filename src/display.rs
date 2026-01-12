@@ -8,6 +8,18 @@ use u8g2_fonts::{fonts, U8g2TextStyle};
 
 use crate::st7789::{LCD_VIEW_H, LCD_VIEW_W};
 
+const COLOR_BG: Rgb565 = Rgb565::new(0, 0, 0);
+const COLOR_FRAME: Rgb565 = Rgb565::new(16, 32, 16);
+const COLOR_CARD: Rgb565 = Rgb565::new(3, 8, 5);
+const COLOR_LABEL: Rgb565 = Rgb565::new(31, 63, 33);
+const COLOR_CO2_ZERO: Rgb565 = Rgb565::new(0, 63, 31);
+const COLOR_TEMP: Rgb565 = Rgb565::new(31, 32, 0);
+const COLOR_HUM: Rgb565 = Rgb565::new(0, 32, 31);
+const COLOR_GOOD: Rgb565 = Rgb565::new(0, 63, 0);
+const COLOR_FAIR: Rgb565 = Rgb565::new(31, 63, 0);
+const COLOR_POOR: Rgb565 = Rgb565::new(31, 24, 0);
+const COLOR_BAD: Rgb565 = Rgb565::new(31, 0, 0);
+
 struct LinearRgb565Slice<'a> {
     data: &'a mut [Rgb565],
 }
@@ -67,34 +79,26 @@ pub fn render_ui_mock1(
     frame: &mut [Rgb565],
     temperature_c: f32,
     humidity_pct: u8,
-    co2_ppm: u16,
+    co2_ppm: Option<u16>,
+    co2_error: bool,
     zero_mode: bool,
+    battery_v: Option<f32>,
 ) -> Result<()> {
     let view_w = LCD_VIEW_W;
     let view_h = LCD_VIEW_H;
     let backend = LinearRgb565Slice::new(frame);
     let mut fb = embedded_graphics_framebuf::FrameBuf::<Rgb565, _>::new(backend, view_w, view_h);
 
-    let bg = Rgb565::new(0, 0, 0);
-    let frame_color = Rgb565::new(16, 32, 16);
-    let card_stroke = Rgb565::new(3, 8, 5);
-
-    let label_color = Rgb565::new(31, 63, 33);
-    let co2_color = Rgb565::new(0, 63, 31);
-    let temp_color = Rgb565::new(31, 32, 0);
-    let hum_color = Rgb565::new(0, 32, 31);
-    let ok_color = Rgb565::new(0, 63, 0);
-
-    fb.clear(bg)?;
+    fb.clear(COLOR_BG)?;
 
     let frame_style = PrimitiveStyleBuilder::new()
-        .stroke_color(frame_color)
+        .stroke_color(COLOR_FRAME)
         .stroke_width(3)
         .build();
     let card_style = PrimitiveStyleBuilder::new()
-        .stroke_color(card_stroke)
+        .stroke_color(COLOR_CARD)
         .stroke_width(2)
-        .fill_color(card_stroke)
+        .fill_color(COLOR_CARD)
         .build();
 
     let frame_rect = Rectangle::new(
@@ -111,15 +115,42 @@ pub fn render_ui_mock1(
     RoundedRectangle::new(panel_temp, card_radii).into_styled(card_style).draw(&mut fb)?;
     RoundedRectangle::new(panel_hum, card_radii).into_styled(card_style).draw(&mut fb)?;
 
-    let style_label = U8g2TextStyle::new(fonts::u8g2_font_helvR10_tf, label_color);
-    let style_co2_value = U8g2TextStyle::new(fonts::u8g2_font_fub35_tf, co2_color);
-    let style_temp_value = U8g2TextStyle::new(fonts::u8g2_font_helvB24_tf, temp_color);
-    let style_hum_value = U8g2TextStyle::new(fonts::u8g2_font_helvB24_tf, hum_color);
-    let style_status = U8g2TextStyle::new(fonts::u8g2_font_helvB12_tf, ok_color);
+    let (co2_value_text, co2_value_color, status_text_opt, status_color) = if zero_mode {
+        ("ZERO".to_string(), COLOR_CO2_ZERO, None, COLOR_CO2_ZERO)
+    } else if co2_error {
+        ("ERR".to_string(), COLOR_BAD, None, COLOR_BAD)
+    } else if let Some(ppm) = co2_ppm {
+        let (status_text, status_color) = co2_status(ppm);
+        (format!("{}", ppm), status_color, Some(status_text), status_color)
+    } else {
+        ("...".to_string(), COLOR_LABEL, None, COLOR_LABEL)
+    };
+
+    let style_label = U8g2TextStyle::new(fonts::u8g2_font_helvR10_tf, COLOR_LABEL);
+    let style_co2_value = U8g2TextStyle::new(fonts::u8g2_font_fub35_tf, co2_value_color);
+    let style_temp_value = U8g2TextStyle::new(fonts::u8g2_font_helvB24_tf, COLOR_TEMP);
+    let style_hum_value = U8g2TextStyle::new(fonts::u8g2_font_helvB24_tf, COLOR_HUM);
+    let style_status = U8g2TextStyle::new(fonts::u8g2_font_helvB12_tf, status_color);
     let center_text = TextStyleBuilder::new()
         .alignment(Alignment::Center)
         .baseline(Baseline::Middle)
         .build();
+    let right_top_text = TextStyleBuilder::new()
+        .alignment(Alignment::Right)
+        .baseline(Baseline::Top)
+        .build();
+
+    let style_label_battery = U8g2TextStyle::new(fonts::u8g2_font_helvR10_tf, COLOR_LABEL);
+    let battery_text = match battery_v {
+        Some(voltage) => format!("BAT {:.2}V", voltage),
+        None => "BAT --.-V".to_string(),
+    };
+    let battery_pos = Point::new(
+        frame_rect.top_left.x + frame_rect.size.width as i32 - 6,
+        frame_rect.top_left.y + 6,
+    );
+    Text::with_text_style(&battery_text, battery_pos, style_label_battery, right_top_text)
+        .draw(&mut fb)?;
 
     let left_center_x = panel_co.center().x;
     let left_top = panel_co.top_left;
@@ -128,19 +159,18 @@ pub fn render_ui_mock1(
     let ppm_y = left_top.y + (left_h * 68) / 100;
     let status_y = left_top.y + (left_h * 82) / 100;
 
-    if zero_mode {
-        Text::with_text_style("ZERO", Point::new(left_center_x, co2_val_y), style_co2_value, center_text)
+    Text::with_text_style(
+        &co2_value_text,
+        Point::new(left_center_x, co2_val_y),
+        style_co2_value,
+        center_text,
+    )
+    .draw(&mut fb)?;
+
+    if let Some(status_text) = status_text_opt {
+        Text::with_text_style("ppm", Point::new(left_center_x, ppm_y), style_label, center_text)
             .draw(&mut fb)?;
-    } else {
-        Text::with_text_style(
-            &format!("{}", co2_ppm),
-            Point::new(left_center_x, co2_val_y),
-            style_co2_value,
-            center_text,
-        )
-        .draw(&mut fb)?;
-        Text::with_text_style("ppm", Point::new(left_center_x, ppm_y), style_label, center_text).draw(&mut fb)?;
-        Text::with_text_style("Good", Point::new(left_center_x, status_y), style_status, center_text)
+        Text::with_text_style(status_text, Point::new(left_center_x, status_y), style_status, center_text)
             .draw(&mut fb)?;
     }
 
@@ -165,4 +195,16 @@ pub fn render_ui_mock1(
     .draw(&mut fb)?;
 
     Ok(())
+}
+
+fn co2_status(co2_ppm: u16) -> (&'static str, Rgb565) {
+    if co2_ppm < 600 {
+        ("Good", COLOR_GOOD)
+    } else if co2_ppm <= 1000 {
+        ("Fair", COLOR_FAIR)
+    } else if co2_ppm <= 1500 {
+        ("Poor", COLOR_POOR)
+    } else {
+        ("Bad", COLOR_BAD)
+    }
 }

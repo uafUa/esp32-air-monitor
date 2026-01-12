@@ -254,6 +254,6 @@ pub fn init_lcd(
     )?;
     let bl_pwm = LedcDriver::new(ledc.channel0, &bl_timer, bl)?;
 
-    let mut lcd = St7789::new(spi_dev, dc, rst, bl_pwm, bl_timer)?;
+    let lcd = St7789::new(spi_dev, dc, rst, bl_pwm, bl_timer)?;
     Ok(lcd)
 }

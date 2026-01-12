@@ -1,4 +1,5 @@
 use anyhow::Result;
+use core::sync::atomic::{AtomicBool, Ordering};
 use esp_idf_hal::gpio::{InputPin, OutputPin};
 use esp_idf_hal::i2c::{I2cConfig, I2cDriver};
 use esp_idf_hal::prelude::*;
@@ -15,6 +16,8 @@ pub const TP_SDA_GPIO: i32 = 18;
 pub const TP_SCL_GPIO: i32 = 19;
 pub const TP_RST_GPIO: i32 = 20;
 pub const TP_INT_GPIO: i32 = 21;
+
+static TOUCH_PENDING: AtomicBool = AtomicBool::new(false);
 
 // Touch controller uses open-drain I2C + external/internal pull-ups.
 pub fn gpio_setup_touch_lines() {
@@ -38,6 +41,39 @@ pub fn gpio_setup_touch_lines() {
         sys::gpio_set_direction(TP_INT_GPIO, sys::gpio_mode_t_GPIO_MODE_INPUT);
         sys::gpio_pullup_en(TP_INT_GPIO);
         sys::gpio_pulldown_dis(TP_INT_GPIO);
+    }
+}
+
+unsafe extern "C" fn touch_isr_handler(_arg: *mut core::ffi::c_void) {
+    TOUCH_PENDING.store(true, Ordering::Release);
+}
+
+pub fn touch_take_pending() -> bool {
+    TOUCH_PENDING.swap(false, Ordering::AcqRel)
+}
+
+fn init_touch_irq() {
+    TOUCH_PENDING.store(false, Ordering::Relaxed);
+    unsafe {
+        let err = sys::gpio_install_isr_service(0);
+        if err != sys::ESP_OK as i32 && err != sys::ESP_ERR_INVALID_STATE as i32 {
+            error!("Touch ISR install failed: {}", err);
+        }
+
+        let err = sys::gpio_set_intr_type(TP_INT_GPIO, sys::gpio_int_type_t_GPIO_INTR_NEGEDGE);
+        if err != sys::ESP_OK as i32 {
+            error!("Touch INT intr_type failed: {}", err);
+        }
+
+        let err = sys::gpio_isr_handler_add(TP_INT_GPIO, Some(touch_isr_handler), core::ptr::null_mut());
+        if err != sys::ESP_OK as i32 && err != sys::ESP_ERR_INVALID_STATE as i32 {
+            error!("Touch ISR handler add failed: {}", err);
+        }
+
+        let err = sys::gpio_intr_enable(TP_INT_GPIO);
+        if err != sys::ESP_OK as i32 {
+            error!("Touch INT enable failed: {}", err);
+        }
     }
 }
 
@@ -72,6 +108,7 @@ pub fn init_i2c<'d, I2C: I2c>(
 ) -> Result<I2cDriver<'d>> {
     gpio_setup_touch_lines();
     touch_reset_pulse();
+    init_touch_irq();
 
     let i2c_cfg = I2cConfig::new().baudrate(100.kHz().into());
     let mut driver = I2cDriver::new(i2c, sda, scl, &i2c_cfg)?;

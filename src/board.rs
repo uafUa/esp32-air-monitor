@@ -4,6 +4,7 @@ use esp_idf_hal::i2c::I2cDriver;
 use esp_idf_hal::ledc;
 use esp_idf_hal::peripherals::Peripherals;
 
+use crate::battery::Battery;
 use crate::st7789::{init_lcd, St7789};
 use crate::mhz19b::{init_mhz19b, Mhz19b};
 use crate::sht31::Sht31;
@@ -13,6 +14,7 @@ pub struct Board {
     pub lcd: St7789<'static, ledc::TIMER0>,
     pub i2c: I2cDriver<'static>,
     pub mhz19b: Mhz19b<'static>,
+    pub battery: Battery<'static>,
     pub sht31: Sht31,
 }
 
@@ -24,6 +26,7 @@ impl Board {
             uart0,
             spi2,
             ledc,
+            adc1,
             ..
         } = Peripherals::take()?;
 
@@ -40,11 +43,13 @@ impl Board {
             AnyIOPin::from(pins.gpio22),
             AnyIOPin::from(pins.gpio23),
         )?;
+        let battery = Battery::new(adc1, pins.gpio0)?;
 
         Ok(Self {
             lcd,
             i2c,
             mhz19b,
+            battery,
             sht31,
         })
     }

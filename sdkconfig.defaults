@@ -12,3 +12,6 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=8000
 # Allow debug logs (per-target filtering done at runtime).
 CONFIG_LOG_MAXIMUM_LEVEL=4
 CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y
+
+# Route console output away from UART0 (used by MH-Z19B).
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
