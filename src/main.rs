@@ -34,7 +34,15 @@ fn main() -> Result<()> {
         LevelFilter::Off
     };
     log::set_max_level(log_level);
-    set_target_level("c6_demo", log_level)?;
+    let global_level = if cfg!(debug_assertions) {
+        LevelFilter::Info
+    } else {
+        LevelFilter::Off
+    };
+    set_target_level("*", global_level)?;
+    set_target_level("c6_demo", LevelFilter::Debug)?;
+    set_target_level("c6_demo::mhz19b", LevelFilter::Debug)?;
+    set_target_level("adc_hal", LevelFilter::Off)?;
 
     let Board {
         mut lcd,
@@ -47,6 +55,8 @@ fn main() -> Result<()> {
     let mut last_env_read = Instant::now() - env_interval;
     let mhz_interval = Duration::from_millis(5000);
     let mut last_mhz_read = Instant::now() - mhz_interval;
+    const MHZ_ERR_REINIT_THRESHOLD: u8 = 3;
+    let mut mhz_error_count: u8 = 0;
     let battery_interval = Duration::from_millis(10000);
     let mut last_battery_read = Instant::now() - battery_interval;
 
@@ -125,6 +135,7 @@ fn main() -> Result<()> {
                     }
                     co2_value = Some(ppm);
                     co2_error = false;
+                    mhz_error_count = 0;
                 }
                 Err(err) => {
                     error!("MH-Z19B read error: {:?}", err);
@@ -135,6 +146,17 @@ fn main() -> Result<()> {
                     }
                     co2_value = None;
                     co2_error = true;
+                    mhz_error_count = mhz_error_count.saturating_add(1);
+                    if mhz_error_count >= MHZ_ERR_REINIT_THRESHOLD {
+                        error!(
+                            "MH-Z19B consecutive errors reached {}, reinitializing UART",
+                            MHZ_ERR_REINIT_THRESHOLD
+                        );
+                        if let Err(err) = mhz19b.reinit_uart() {
+                            error!("MH-Z19B UART reinit failed: {:?}", err);
+                        }
+                        mhz_error_count = 0;
+                    }
                 }
             }
             last_mhz_read = Instant::now();

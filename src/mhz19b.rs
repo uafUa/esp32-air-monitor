@@ -6,6 +6,7 @@ use esp_idf_hal::gpio::{InputPin, OutputPin};
 use esp_idf_hal::peripheral::Peripheral;
 use esp_idf_hal::prelude::*;
 use esp_idf_hal::uart::{UartConfig, UartDriver};
+use log::{debug, error};
 
 pub const MHZ19B_BAUD: u32 = 9_600;
 
@@ -58,6 +59,24 @@ impl<'a> Mhz19b<'a> {
         Ok(())
     }
 
+    pub fn set_abc(&mut self, enabled: bool) -> Result<(), MhzError> {
+        // ABC (automatic baseline correction) enable/disable command.
+        let abc = if enabled { 0xA0 } else { 0x00 };
+        let mut cmd = [0xFFu8, 0x01, 0x79, abc, 0, 0, 0, 0, 0];
+        cmd[8] = checksum(&cmd[1..8]);
+        self.uart.write(&cmd).map_err(MhzError::Uart)?;
+        self.uart.wait_tx_done(BLOCK).map_err(MhzError::Uart)?;
+        Ok(())
+    }
+
+    pub fn reinit_uart(&mut self) -> Result<(), MhzError> {
+        self.uart.clear_rx().map_err(MhzError::Uart)?;
+        self.uart
+            .change_baudrate(MHZ19B_BAUD.Hz())
+            .map_err(MhzError::Uart)?;
+        Ok(())
+    }
+
     pub fn uart_mut(&mut self) -> &mut UartDriver<'a> {
         &mut self.uart
     }
@@ -87,14 +106,26 @@ impl<'a> Mhz19b<'a> {
         }
 
         if received < buf.len() {
+            error!(
+                "MH-Z19B timeout: got {}/9 bytes: {:02X?}",
+                received,
+                &buf[..received]
+            );
             return Err(MhzError::Timeout);
         }
+
+        debug!("MH-Z19B frame: {:02X?}", buf);
         if buf[0] != 0xFF || buf[1] != 0x86 {
+            error!("MH-Z19B frame header mismatch: {:02X?}", buf);
             return Err(MhzError::Frame);
         }
 
         let expected = checksum(&buf[1..8]);
         if buf[8] != expected {
+            error!(
+                "MH-Z19B checksum mismatch: expected {:02X}, got {:02X}, frame {:02X?}",
+                expected, buf[8], buf
+            );
             return Err(MhzError::Checksum);
         }
 

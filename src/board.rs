@@ -31,7 +31,8 @@ impl Board {
         } = Peripherals::take()?;
 
         let i2c = init_i2c(i2c0, pins.gpio18, pins.gpio19)?;
-        let mhz19b = init_mhz19b(uart0, pins.gpio16, pins.gpio17)?;
+        let mut mhz19b = init_mhz19b(uart0, pins.gpio16, pins.gpio17)?;
+        mhz19b.set_abc(false)?;
         let sht31 = Sht31::new_default();
         let lcd = init_lcd(
             spi2,
