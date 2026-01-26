@@ -1,7 +1,7 @@
 # Copilot Instructions (c6-demo)
 
 ## Overview
-This project targets an ESP32‑C6 Touch LCD board (1.47" ST7789 + touch). It displays CO2, temperature, and humidity using an on-device UI and reads sensors via UART/I2C.
+This project targets an ESP32‑C6 Touch LCD board (1.47" ST7789 + touch). It displays CO2, temperature, humidity, and battery voltage using an on-device UI and reads sensors via UART/I2C. OTA updates are pulled over HTTP.
 
 ## Hardware / Pin Mapping
 - LCD (SPI2): SCLK GPIO1, MOSI GPIO2, CS GPIO14, DC GPIO15, RST GPIO22, BL GPIO23
@@ -10,12 +10,15 @@ This project targets an ESP32‑C6 Touch LCD board (1.47" ST7789 + touch). It di
 - SHT31 (I2C): shared bus GPIO18/19, default address 0x44
 
 ## Module Layout
-- `src/board.rs`: one entry point to init peripherals. `Board::init()` returns lcd/i2c/mhz19b/sht31.
+- `src/board.rs`: one entry point to init peripherals. `Board::init()` returns lcd/i2c/mhz19b/sht31/wifi/battery.
 - `src/st7789.rs`: ST7789 LCD driver (SPI), init, brightness control.
 - `src/display.rs`: UI layout & drawing with embedded‑graphics + u8g2 fonts.
 - `src/touch.rs`: touch controller I2C init, scan, read.
 - `src/mhz19b.rs`: MH‑Z19B UART protocol (read, zero calibration, ABC on/off).
 - `src/sht31.rs`: SHT31 I2C read (single‑shot high repeatability + CRC).
+- `src/battery.rs`: ADC battery voltage reader.
+- `src/wifi.rs`: Wi‑Fi init and reconnect helpers.
+- `src/ota.rs`: OTA check/download/apply logic (HTTP + ESP‑IDF OTA).
 
 ## Display Details
 - Panel size: 172x320 (LCD_W/LCD_H).
@@ -24,10 +27,16 @@ This project targets an ESP32‑C6 Touch LCD board (1.47" ST7789 + touch). It di
 - Framebuffer is full panel size; render in landscape view.
 
 ## Runtime Logic
-- SHT31 read every ~2s; values shown in UI.
-- MH‑Z19B read every ~5s; CO2 shown in UI.
+- SHT31 read every ~2s; values shown in UI (or "n/a" if missing).
+- MH‑Z19B read every ~5s; CO2 shown in UI (or error state if missing).
 - Touch in CO2 card for ~2s triggers zero calibration; “ZERO” is displayed briefly.
-- ABC is disabled at boot via `mhz19b.set_abc(false)`.
+- ABC is disabled at boot in `Board::init()` via `mhz19b.set_abc(false)`.
+- OTA periodically checks `OTA_BASE_URL` + `latest.txt` and flashes if a higher filename version is found.
+
+## Build + OTA Artifacts
+- `scripts/build-export.sh` increments `scripts/build-number.txt`, builds, then exports OTA.
+- OTA build number comes from `OTA_BUILD` or `scripts/build-number.txt` via `build.rs`.
+- `scripts/export-ota.sh` uses `espflash save-image` on the ELF (`target/.../c6-demo`) and writes `c6-co####.bin` + `latest.txt`.
 
 ## Notes
 - UART0 is used for MH‑Z19B, so serial logs may interfere.

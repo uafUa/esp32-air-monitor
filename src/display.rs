@@ -77,8 +77,8 @@ pub fn co2_card_rect() -> Rectangle {
 
 pub fn render_ui_mock1(
     frame: &mut [Rgb565],
-    temperature_c: f32,
-    humidity_pct: u8,
+    temperature_c: Option<f32>,
+    humidity_pct: Option<u8>,
     co2_ppm: Option<u16>,
     co2_error: bool,
     zero_mode: bool,
@@ -176,8 +176,12 @@ pub fn render_ui_mock1(
 
     let rt_center_x = panel_temp.center().x;
     let rt_center_y = panel_temp.center().y;
+    let temp_text = match temperature_c {
+        Some(value) => format!("{:.1}°C", value),
+        None => "n/a".to_string(),
+    };
     Text::with_text_style(
-        &format!("{:.1}°C", temperature_c),
+        &temp_text,
         Point::new(rt_center_x, rt_center_y),
         style_temp_value,
         center_text,
@@ -186,8 +190,12 @@ pub fn render_ui_mock1(
 
     let rb_center_x = panel_hum.center().x;
     let rb_center_y = panel_hum.center().y;
+    let hum_text = match humidity_pct {
+        Some(value) => format!("{}%", value),
+        None => "n/a".to_string(),
+    };
     Text::with_text_style(
-        &format!("{}%", humidity_pct),
+        &hum_text,
         Point::new(rb_center_x, rb_center_y),
         style_hum_value,
         center_text,

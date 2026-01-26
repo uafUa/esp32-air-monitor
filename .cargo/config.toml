@@ -4,7 +4,12 @@ target = "riscv32imac-esp-espidf"
 [target.riscv32imac-esp-espidf]
 linker = "ldproxy"
 runner = "espflash flash --monitor"
-rustflags = [ "--cfg",  "espidf_time64"]
+rustflags = [
+    "--cfg",
+    "espidf_time64",
+    "-C",
+    "link-arg=--ldproxy-linker=/home/uaf/c6-demo/.embuild/espressif/tools/riscv32-esp-elf/esp-13.2.0_20240530/riscv32-esp-elf/bin/riscv32-esp-elf-gcc",
+]
 
 [unstable]
 build-std = ["std", "panic_abort"]
@@ -13,4 +18,10 @@ build-std = ["std", "panic_abort"]
 MCU="esp32c6"
 # Note: this variable is not used by the pio builder (`cargo build --features pio`)
 ESP_IDF_VERSION = "v5.3.3"
-
+ESP_IDF_TOOLS_INSTALL_DIR = "fromenv"
+ESP_IDF_COMPONENT_MANAGER = "false"
+IDF_PATH = "/home/uaf/c6-demo/.embuild/espressif/esp-idf/v5.3.3"
+IDF_TOOLS_PATH = "/home/uaf/c6-demo/.embuild/espressif"
+IDF_PYTHON_ENV_PATH = "/home/uaf/c6-demo/.embuild/espressif/python_env/idf5.3_py3.12_env"
+ESP_ROM_ELF_DIR = "/home/uaf/c6-demo/.embuild/espressif/esp-idf/v5.3.3/components/esp_rom/esp32c6"
+PATH = "/home/uaf/c6-demo/.embuild/espressif/python_env/idf5.3_py3.12_env/bin:/home/uaf/c6-demo/.embuild/espressif/esp-idf/v5.3.3/tools:/home/uaf/c6-demo/.embuild/espressif/tools/riscv32-esp-elf/esp-13.2.0_20240530/riscv32-esp-elf/bin:/home/uaf/.codex/tmp/path/codex-arg0Av69IY:/home/uaf/.vscode-server/bin/585eba7c0c34fd6b30faac7c62a42050bfbc0086/bin/remote-cli:/home/uaf/.cargo/bin:/home/uaf/.nvm/versions/node/v22.20.0/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/usr/lib/wsl/lib:/mnt/c/Users/uaf/AppData/Local/Programs/Python/Python311:/mnt/c/Python314/Scripts/:/mnt/c/Python314/:/mnt/c/WINDOWS/system32:/mnt/c/WINDOWS:/mnt/c/WINDOWS/System32/Wbem:/mnt/c/WINDOWS/System32/WindowsPowerShell/v1.0/:/mnt/c/WINDOWS/System32/OpenSSH/:/mnt/c/Program Files/NVIDIA Corporation/NVIDIA App/NvDLISR:/mnt/c/Program Files (x86)/NVIDIA Corporation/PhysX/Common:/mnt/c/Program Files/CMake/bin:/mnt/c/Program Files/nodejs/:/mnt/c/ProgramData/chocolatey/bin:/mnt/c/Program Files/dotnet/:/mnt/c/Program Files/Git/cmd:/mnt/c/Program Files/usbipd-win/:/mnt/c/Program Files (x86)/Windows Kits/10/Windows Performance Toolkit/:/mnt/c/Users/uaf/.cargo/bin:/mnt/c/Users/uaf/AppData/Local/Microsoft/WindowsApps:/mnt/c/Users/uaf/AppData/Local/Programs/Microsoft VS Code/bin:/mnt/c/Users/uaf/AppData/Local/Programs/Antigravity/bin:/mnt/c/Users/uaf/AppData/Roaming/npm:/mnt/c/Users/uaf/AppData/Roaming/Python/Python311/Scripts:/mnt/c/Users/uaf/AppData/Local/Microsoft/WinGet/Packages/Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe/ffmpeg-8.0.1-full_build/bin:/snap/bin:/home/uaf/.vscode-server/extensions/openai.chatgpt-0.4.66-linux-x64/bin/linux-x86_64"

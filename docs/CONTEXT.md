@@ -14,7 +14,9 @@
 - `src/touch.rs`: I2C init, scan, touch read.
 - `src/mhz19b.rs`: MH-Z19B UART driver.
 - `src/sht31.rs`: SHT31 I2C driver (single-shot, CRC).
-- `src/main.rs`: uses `Board::init()`; reads SHT31 for temp/humidity; reads MH-Z19B for CO2; renders UI; touch hold in CO2 area triggers zero calibration.
+- `src/wifi.rs`: Wi-Fi init + connect helpers.
+- `src/ota.rs`: OTA check/download/apply logic (HTTP + ESP-IDF OTA).
+- `src/main.rs`: uses `Board::init()`; reads SHT31 for temp/humidity; reads MH-Z19B for CO2; renders UI; touch hold in CO2 area triggers zero calibration; periodic OTA checks.
 
 ## Display Notes
 - LCD is driven in landscape using MADCTL (0x36) = 0x68 (MV+MX+BGR).

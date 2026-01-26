@@ -9,6 +9,8 @@ use crate::st7789::{init_lcd, St7789};
 use crate::mhz19b::{init_mhz19b, Mhz19b};
 use crate::sht31::Sht31;
 use crate::touch::init_i2c;
+use crate::wifi::init_wifi;
+use log::warn;
 
 pub struct Board {
     pub lcd: St7789<'static, ledc::TIMER0>,
@@ -16,6 +18,7 @@ pub struct Board {
     pub mhz19b: Mhz19b<'static>,
     pub battery: Battery<'static>,
     pub sht31: Sht31,
+    pub wifi: Option<esp_idf_svc::wifi::BlockingWifi<esp_idf_svc::wifi::EspWifi<'static>>>,
 }
 
 impl Board {
@@ -27,6 +30,7 @@ impl Board {
             spi2,
             ledc,
             adc1,
+            modem,
             ..
         } = Peripherals::take()?;
 
@@ -34,6 +38,13 @@ impl Board {
         let mut mhz19b = init_mhz19b(uart0, pins.gpio16, pins.gpio17)?;
         mhz19b.set_abc(false)?;
         let sht31 = Sht31::new_default();
+        let wifi = match init_wifi(modem) {
+            Ok(wifi) => Some(wifi),
+            Err(err) => {
+                warn!("Wi-Fi init failed: {:?}", err);
+                None
+            }
+        };
         let lcd = init_lcd(
             spi2,
             ledc,
@@ -52,6 +63,7 @@ impl Board {
             mhz19b,
             battery,
             sht31,
+            wifi,
         })
     }
 }

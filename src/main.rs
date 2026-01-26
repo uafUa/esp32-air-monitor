@@ -3,13 +3,16 @@
 mod board;
 mod battery;
 mod display;
+mod ota;
 mod sht31;
 mod st7789;
 mod mhz19b;
 mod touch;
+mod wifi;
 
 use crate::board::Board;
 use crate::display::{co2_card_rect, render_ui_mock1};
+use crate::ota::{check_and_update, mark_app_valid, OTA_CHECK_INTERVAL};
 use crate::st7789::{LCD_H, LCD_W};
 use crate::touch::{read_touch, touch_take_pending};
 
@@ -17,7 +20,7 @@ use anyhow::Result;
 use embedded_graphics::geometry::Point;
 use embedded_graphics::pixelcolor::{Rgb565, RgbColor};
 use esp_idf_svc::log::{set_target_level, EspLogger};
-use log::{error, LevelFilter};
+use log::{error, warn, LevelFilter};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -31,26 +34,49 @@ fn main() -> Result<()> {
     let log_level = if cfg!(debug_assertions) {
         LevelFilter::Debug
     } else {
-        LevelFilter::Off
+        LevelFilter::Info
     };
     log::set_max_level(log_level);
     let global_level = if cfg!(debug_assertions) {
         LevelFilter::Info
     } else {
-        LevelFilter::Off
+        LevelFilter::Info
     };
-    set_target_level("*", global_level)?;
-    set_target_level("c6_demo", LevelFilter::Debug)?;
-    set_target_level("c6_demo::mhz19b", LevelFilter::Debug)?;
-    set_target_level("adc_hal", LevelFilter::Off)?;
+    if let Err(err) = set_target_level("*", global_level) {
+        warn!("Failed to set log level: {:?}", err);
+    }
+    if let Err(err) = set_target_level("c6_demo", LevelFilter::Debug) {
+        warn!("Failed to set log level for c6_demo: {:?}", err);
+    }
+    if let Err(err) = set_target_level("c6_demo::mhz19b", LevelFilter::Debug) {
+        warn!("Failed to set log level for c6_demo::mhz19b: {:?}", err);
+    }
+    if let Err(err) = set_target_level("adc_hal", LevelFilter::Off) {
+        warn!("Failed to set log level for adc_hal: {:?}", err);
+    }
 
+    if let Err(err) = run() {
+        error!("Fatal error, exiting main loop: {:?}", err);
+        loop {
+            thread::sleep(Duration::from_secs(1));
+        }
+    }
+    Ok(())
+}
+
+fn run() -> Result<()> {
+    log::info!("App start");
     let Board {
         mut lcd,
         mut i2c,
         mut mhz19b,
         mut battery,
         sht31,
+        mut wifi,
     } = Board::init()?;
+    if let Err(err) = mark_app_valid() {
+        warn!("OTA mark-running-valid failed: {:?}", err);
+    }
     let env_interval = Duration::from_millis(2000);
     let mut last_env_read = Instant::now() - env_interval;
     let mhz_interval = Duration::from_millis(5000);
@@ -59,13 +85,14 @@ fn main() -> Result<()> {
     let mut mhz_error_count: u8 = 0;
     let battery_interval = Duration::from_millis(10000);
     let mut last_battery_read = Instant::now() - battery_interval;
+    let mut last_ota_check = Instant::now() - OTA_CHECK_INTERVAL;
 
     // ---- Framebuffer ----
     let mut frame: Vec<Rgb565> = vec![Rgb565::BLACK; LCD_W * LCD_H];
 
     // Live sensor readings.
-    let mut temperature_c: f32 = 21.6;
-    let mut humidity_pct: u8 = 45;
+    let mut temperature_c: Option<f32> = None;
+    let mut humidity_pct: Option<u8> = None;
     let mut co2_value: Option<u16> = None;
     let mut co2_error = false;
     let mut battery_v: Option<f32> = None;
@@ -89,8 +116,8 @@ fn main() -> Result<()> {
     let mut dimming_in_progress = false;
     let mut dimmed_brightness: u8 = DEFAULT_BRIGHTNESS;
     let mut render_needed = true;
-    let mut last_temp_display = (temperature_c * 10.0).round() as i32;
-    let mut last_humidity_display = humidity_pct;
+    let mut last_temp_display: Option<i32> = None;
+    let mut last_humidity_display: Option<u8> = None;
     let mut last_co2_display: Option<u16> = None;
     let mut last_co2_error = false;
     let mut last_zero_mode = false;
@@ -109,14 +136,15 @@ fn main() -> Result<()> {
                     let new_temp = reading.temperature_c;
                     let new_humidity = reading.humidity_pct.clamp(0.0, 100.0).round() as u8;
                     let new_temp_display = (new_temp * 10.0).round() as i32;
-                    if new_temp_display != last_temp_display || new_humidity != last_humidity_display
+                    if Some(new_temp_display) != last_temp_display
+                        || Some(new_humidity) != last_humidity_display
                     {
                         render_needed = true;
-                        last_temp_display = new_temp_display;
-                        last_humidity_display = new_humidity;
+                        last_temp_display = Some(new_temp_display);
+                        last_humidity_display = Some(new_humidity);
                     }
-                    temperature_c = new_temp;
-                    humidity_pct = new_humidity;
+                    temperature_c = Some(new_temp);
+                    humidity_pct = Some(new_humidity);
                 }
                 Err(err) => {
                     error!("SHT31 read error: {:?}", err);
@@ -160,6 +188,15 @@ fn main() -> Result<()> {
                 }
             }
             last_mhz_read = Instant::now();
+        }
+
+        if last_ota_check.elapsed() >= OTA_CHECK_INTERVAL {
+            if let Some(wifi) = wifi.as_mut() {
+                if let Err(err) = check_and_update(wifi) {
+                    error!("OTA check failed: {:?}", err);
+                }
+            }
+            last_ota_check = Instant::now();
         }
 
         if last_battery_read.elapsed() >= battery_interval {
@@ -261,7 +298,7 @@ fn main() -> Result<()> {
                 battery_v,
             )?;
             lcd.flush_full(&frame)?;
-            render_needed = false;
+        render_needed = false;
         }
 
         thread::sleep(SLEEP_INTERFVAL);
