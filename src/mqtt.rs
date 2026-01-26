@@ -3,7 +3,9 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
+// embedded-svc defines the MQTT traits and event payloads used across platforms.
 use embedded_svc::mqtt::client::{EventPayload, QoS};
+// esp-idf-svc provides the ESP-IDF backed MQTT client implementation and config.
 use esp_idf_svc::mqtt::client::{EspMqttClient, LwtConfiguration, MqttClientConfiguration};
 use log::{info, warn};
 
@@ -81,6 +83,7 @@ impl MqttClient {
 pub fn init_mqtt(
     wifi: &mut esp_idf_svc::wifi::BlockingWifi<esp_idf_svc::wifi::EspWifi<'static>>,
 ) -> Result<MqttClient> {
+    // Ensure Wi-Fi is connected before starting the MQTT client.
     ensure_connected(wifi)?;
 
     let topics = Topics {
@@ -93,6 +96,7 @@ pub fn init_mqtt(
         .and_then(|v| v.parse::<u16>().ok())
         .unwrap_or(MQTT_PORT_DEFAULT);
     let url = format!("mqtt://{}:{}", MQTT_HOST, port);
+    // ESP-IDF MQTT client configuration (LWT, auth, keepalive, timeouts).
     let mut conf = MqttClientConfiguration::default();
     conf.client_id = Some(MQTT_CLIENT_ID);
     conf.username = MQTT_USER;
@@ -106,11 +110,13 @@ pub fn init_mqtt(
         retain: true,
     });
 
+    // Create the client plus a connection event iterator.
     let (mut client, mut conn) = EspMqttClient::new(&url, &conf)?;
     let (cmd_tx, cmd_rx) = mpsc::channel::<Command>();
     let (conn_tx, conn_rx) = mpsc::channel::<bool>();
     let cmd_topic = topics.cmd.clone();
 
+    // Event loop runs on a separate thread; it receives MQTT events from ESP-IDF.
     thread::spawn(move || loop {
         match conn.next() {
             Ok(event) => {
@@ -139,12 +145,14 @@ pub fn init_mqtt(
         }
     });
 
+    // Wait for the broker connection before we publish/subscribe.
     match conn_rx.recv_timeout(Duration::from_secs(5)) {
         Ok(true) => {}
         Ok(false) => return Err(anyhow!("MQTT disconnected during init")),
         Err(_) => return Err(anyhow!("MQTT connect timeout")),
     }
 
+    // Subscribe for commands after connection succeeds.
     client.subscribe(&topics.cmd, QoS::AtLeastOnce)?;
     client.publish(
         &topics.availability,
@@ -152,6 +160,7 @@ pub fn init_mqtt(
         true,
         PAYLOAD_ONLINE.as_bytes(),
     )?;
+    // Publish HomeAssistant discovery configs so entities show up automatically.
     publish_discovery(&mut client, &topics)?;
 
     info!("MQTT connected to {}", url);
@@ -237,6 +246,7 @@ fn publish_discovery(client: &mut EspMqttClient<'static>, topics: &Topics) -> Re
         r#""device":{{"identifiers":["{device_id}"],"name":"{device_name}","model":"ESP32-C6 Touch LCD 1.47","manufacturer":"Espressif","sw_version":"{sw_version}"}}"#
     );
 
+    // CO2 sensor entity: uses value_template to pull co2_ppm from the JSON status payload.
     publish_sensor_config(
         client,
         &device_id,
@@ -249,6 +259,7 @@ fn publish_discovery(client: &mut EspMqttClient<'static>, topics: &Topics) -> Re
         Some("measurement"),
         &device,
     )?;
+    // Temperature sensor entity (°C) from JSON status payload.
     publish_sensor_config(
         client,
         &device_id,
@@ -261,6 +272,7 @@ fn publish_discovery(client: &mut EspMqttClient<'static>, topics: &Topics) -> Re
         Some("measurement"),
         &device,
     )?;
+    // Humidity sensor entity (%) from JSON status payload.
     publish_sensor_config(
         client,
         &device_id,
@@ -273,6 +285,7 @@ fn publish_discovery(client: &mut EspMqttClient<'static>, topics: &Topics) -> Re
         Some("measurement"),
         &device,
     )?;
+    // Battery voltage sensor entity (V) from JSON status payload.
     publish_sensor_config(
         client,
         &device_id,
@@ -283,6 +296,49 @@ fn publish_discovery(client: &mut EspMqttClient<'static>, topics: &Topics) -> Re
         Some("V"),
         Some("voltage"),
         Some("measurement"),
+        &device,
+    )?;
+    // Button entity: publishes "zero_calibrate" to <prefix>/cmd when pressed.
+    publish_button_config(
+        client,
+        &device_id,
+        "zero_calibrate",
+        "C6 Zero Calibrate",
+        topics,
+        "zero_calibrate",
+        &device,
+    )?;
+    // Button entity: publishes "reboot" to <prefix>/cmd when pressed.
+    publish_button_config(
+        client,
+        &device_id,
+        "reboot",
+        "C6 Reboot",
+        topics,
+        "reboot",
+        &device,
+    )?;
+    // Switch entity (optimistic): publishes "abc:on"/"abc:off" to <prefix>/cmd.
+    publish_switch_config(
+        client,
+        &device_id,
+        "abc",
+        "C6 ABC",
+        topics,
+        "abc:on",
+        "abc:off",
+        &device,
+    )?;
+    // Number entity (optimistic slider 0..100): publishes "brightness:<value>" to <prefix>/cmd.
+    publish_number_config(
+        client,
+        &device_id,
+        "brightness",
+        "C6 Brightness",
+        topics,
+        0,
+        100,
+        1,
         &device,
     )?;
 
@@ -302,6 +358,7 @@ fn publish_sensor_config(
     state_class: Option<&str>,
     device: &str,
 ) -> Result<()> {
+    // HomeAssistant MQTT sensor discovery payload.
     let mut payload = format!(
         r#"{{"name":"{name}","state_topic":"{state_topic}","value_template":"{value_template}","availability_topic":"{availability_topic}","payload_available":"{online}","payload_not_available":"{offline}","unique_id":"{device_id}-{key}","#,
         state_topic = topics.status,
@@ -323,6 +380,78 @@ fn publish_sensor_config(
     payload.push('}');
 
     let topic = format!("homeassistant/sensor/{device_id}/{key}/config");
+    client.publish(&topic, QoS::AtLeastOnce, true, payload.as_bytes())?;
+    Ok(())
+}
+
+fn publish_button_config(
+    client: &mut EspMqttClient<'static>,
+    device_id: &str,
+    key: &str,
+    name: &str,
+    topics: &Topics,
+    payload_press: &str,
+    device: &str,
+) -> Result<()> {
+    // HomeAssistant MQTT button discovery payload (stateless action).
+    let payload = format!(
+        r#"{{"name":"{name}","command_topic":"{command_topic}","payload_press":"{payload_press}","availability_topic":"{availability_topic}","payload_available":"{online}","payload_not_available":"{offline}","unique_id":"{device_id}-{key}",{device}}}"#,
+        command_topic = topics.cmd,
+        availability_topic = topics.availability,
+        online = PAYLOAD_ONLINE,
+        offline = PAYLOAD_OFFLINE,
+    );
+
+    let topic = format!("homeassistant/button/{device_id}/{key}/config");
+    client.publish(&topic, QoS::AtLeastOnce, true, payload.as_bytes())?;
+    Ok(())
+}
+
+fn publish_switch_config(
+    client: &mut EspMqttClient<'static>,
+    device_id: &str,
+    key: &str,
+    name: &str,
+    topics: &Topics,
+    payload_on: &str,
+    payload_off: &str,
+    device: &str,
+) -> Result<()> {
+    // HomeAssistant MQTT switch discovery payload (optimistic, no state topic).
+    let payload = format!(
+        r#"{{"name":"{name}","command_topic":"{command_topic}","payload_on":"{payload_on}","payload_off":"{payload_off}","optimistic":true,"availability_topic":"{availability_topic}","payload_available":"{online}","payload_not_available":"{offline}","unique_id":"{device_id}-{key}",{device}}}"#,
+        command_topic = topics.cmd,
+        availability_topic = topics.availability,
+        online = PAYLOAD_ONLINE,
+        offline = PAYLOAD_OFFLINE,
+    );
+
+    let topic = format!("homeassistant/switch/{device_id}/{key}/config");
+    client.publish(&topic, QoS::AtLeastOnce, true, payload.as_bytes())?;
+    Ok(())
+}
+
+fn publish_number_config(
+    client: &mut EspMqttClient<'static>,
+    device_id: &str,
+    key: &str,
+    name: &str,
+    topics: &Topics,
+    min: i32,
+    max: i32,
+    step: i32,
+    device: &str,
+) -> Result<()> {
+    // HomeAssistant MQTT number discovery payload (optimistic slider).
+    let payload = format!(
+        r#"{{"name":"{name}","command_topic":"{command_topic}","command_template":"brightness:{{{{ value }}}}","min":{min},"max":{max},"step":{step},"mode":"slider","unit_of_measurement":"%","optimistic":true,"availability_topic":"{availability_topic}","payload_available":"{online}","payload_not_available":"{offline}","unique_id":"{device_id}-{key}",{device}}}"#,
+        command_topic = topics.cmd,
+        availability_topic = topics.availability,
+        online = PAYLOAD_ONLINE,
+        offline = PAYLOAD_OFFLINE,
+    );
+
+    let topic = format!("homeassistant/number/{device_id}/{key}/config");
     client.publish(&topic, QoS::AtLeastOnce, true, payload.as_bytes())?;
     Ok(())
 }
