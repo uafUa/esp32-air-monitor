@@ -14,6 +14,7 @@
 - `src/touch.rs`: I2C init, scan, touch read.
 - `src/mhz19b.rs`: MH-Z19B UART driver.
 - `src/sht31.rs`: SHT31 I2C driver (single-shot, CRC).
+- `src/mqtt.rs`: MQTT client + HomeAssistant discovery + command handling.
 - `src/wifi.rs`: Wi-Fi init + connect helpers.
 - `src/ota.rs`: OTA check/download/apply logic (HTTP + ESP-IDF OTA).
 - `src/main.rs`: uses `Board::init()`; reads SHT31 for temp/humidity; reads MH-Z19B for CO2; renders UI; touch hold in CO2 area triggers zero calibration; periodic OTA checks.
@@ -30,6 +31,15 @@
 ## Build/Flash
 - Typical: `cargo build` / `cargo run` with ESP-IDF toolchain.
 - Optional scripts: `scripts/build.sh` and `scripts/flash.sh` (if you keep them).
+
+## MQTT
+- Broker: `MQTT_HOST`/`MQTT_PORT` (defaults to `homeassistant.local:1883`).
+- Auth: set `MQTT_USER`/`MQTT_PASS` at build time (empty means anonymous).
+- Topics (prefix `MQTT_PREFIX`, default `c6-demo`):
+  - Status: `<prefix>/status` (JSON payload).
+  - Commands: `<prefix>/cmd` (`zero_calibrate`, `abc:on|off`, `brightness:NN`, `reboot`).
+  - Availability: `<prefix>/availability` (`online`/`offline`, retained + LWT).
+- HomeAssistant discovery published to `homeassistant/sensor/.../config`.
 
 ## Toolchain
 - `rust-toolchain.toml` pins the Rust toolchain used for ESP builds.

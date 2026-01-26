@@ -42,3 +42,11 @@ This project targets an ESP32‑C6 Touch LCD board (1.47" ST7789 + touch). It di
 - UART0 is used for MH‑Z19B, so serial logs may interfere.
 - Brightness uses PWM + WRCTRLD/WRDISBV.
 - See `wiring.md` for wiring; see `docs/CONTEXT.md` for a concise project summary.
+
+## MQTT
+- Defaults: `MQTT_HOST=homeassistant.local`, `MQTT_PORT=1883`, `MQTT_PREFIX=c6-demo`.
+- Topics:
+  - Status: `<prefix>/status` (JSON telemetry).
+  - Commands: `<prefix>/cmd` (`zero_calibrate`, `abc:on|off`, `brightness:NN`, `reboot`).
+  - Availability: `<prefix>/availability` (`online`/`offline`, retained + LWT).
+- HomeAssistant discovery is published at boot to `homeassistant/sensor/.../config`.

@@ -7,11 +7,13 @@ mod ota;
 mod sht31;
 mod st7789;
 mod mhz19b;
+mod mqtt;
 mod touch;
 mod wifi;
 
 use crate::board::Board;
 use crate::display::{co2_card_rect, render_ui_mock1};
+use crate::mqtt::{Command as MqttCommand, Telemetry as MqttTelemetry};
 use crate::ota::{check_and_update, mark_app_valid, OTA_CHECK_INTERVAL};
 use crate::st7789::{LCD_H, LCD_W};
 use crate::touch::{read_touch, touch_take_pending};
@@ -20,7 +22,8 @@ use anyhow::Result;
 use embedded_graphics::geometry::Point;
 use embedded_graphics::pixelcolor::{Rgb565, RgbColor};
 use esp_idf_svc::log::{set_target_level, EspLogger};
-use log::{error, warn, LevelFilter};
+use esp_idf_svc::sys::esp_restart;
+use log::{error, info, warn, LevelFilter};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -77,6 +80,16 @@ fn run() -> Result<()> {
     if let Err(err) = mark_app_valid() {
         warn!("OTA mark-running-valid failed: {:?}", err);
     }
+    let mut mqtt = match wifi.as_mut() {
+        Some(wifi) => match mqtt::init_mqtt(wifi) {
+            Ok(client) => Some(client),
+            Err(err) => {
+                warn!("MQTT init failed: {:?}", err);
+                None
+            }
+        },
+        None => None,
+    };
     let env_interval = Duration::from_millis(2000);
     let mut last_env_read = Instant::now() - env_interval;
     let mhz_interval = Duration::from_millis(5000);
@@ -107,6 +120,7 @@ fn run() -> Result<()> {
     const DISPLAY_OFF_DURATION: Duration = Duration::from_secs(2); // duration for which display reduces brightness
     const DEFAULT_BRIGHTNESS: u8 = 10;
     const SLEEP_INTERFVAL: Duration = Duration::from_millis(200);
+    const MQTT_PUBLISH_INTERVAL: Duration = Duration::from_secs(10);
     lcd.set_brightness(DEFAULT_BRIGHTNESS)?;
     let mut last_touch = Instant::now();
     let dimming_steps =
@@ -123,7 +137,41 @@ fn run() -> Result<()> {
     let mut last_zero_mode = false;
     let mut last_battery_display: Option<i32> = None;
     let mut touch_active = false;
+    let mut last_mqtt_publish = Instant::now();
     loop {
+        if let Some(mqtt) = mqtt.as_mut() {
+            while let Some(cmd) = mqtt.try_recv_command() {
+                match cmd {
+                    MqttCommand::ZeroCalibrate => {
+                        if let Err(err) = mhz19b.calibrate_zero() {
+                            error!("MQTT zero calibration failed: {:?}", err);
+                        } else {
+                            info!("MQTT zero calibration triggered");
+                            zero_feedback_until = Some(Instant::now() + zero_feedback_duration);
+                            render_needed = true;
+                        }
+                    }
+                    MqttCommand::SetAbc(enabled) => {
+                        if let Err(err) = mhz19b.set_abc(enabled) {
+                            error!("MQTT set ABC failed: {:?}", err);
+                        } else {
+                            info!("MQTT set ABC: {}", enabled);
+                        }
+                    }
+                    MqttCommand::SetBrightness(percent) => {
+                        if let Err(err) = lcd.set_brightness(percent) {
+                            error!("MQTT set brightness failed: {:?}", err);
+                        } else {
+                            info!("MQTT brightness set to {}%", percent);
+                        }
+                    }
+                    MqttCommand::Reboot => unsafe {
+                        info!("MQTT reboot requested");
+                        esp_restart();
+                    },
+                }
+            }
+        }
 
         if dimming_in_progress && dimmed_brightness > 0 {
             dimmed_brightness = dimmed_brightness.saturating_sub(dimming_step);
@@ -212,6 +260,21 @@ fn run() -> Result<()> {
                 Err(err) => error!("Battery read error: {:?}", err),
             }
             last_battery_read = Instant::now();
+        }
+
+        if last_mqtt_publish.elapsed() >= MQTT_PUBLISH_INTERVAL {
+            if let Some(mqtt) = mqtt.as_mut() {
+                let telemetry = MqttTelemetry {
+                    co2_ppm: co2_value,
+                    temp_c: temperature_c,
+                    humidity_pct,
+                    battery_v,
+                };
+                if let Err(err) = mqtt.publish_status(&telemetry) {
+                    warn!("MQTT publish failed: {:?}", err);
+                }
+            }
+            last_mqtt_publish = Instant::now();
         }
 
         let irq_pending = touch_take_pending();

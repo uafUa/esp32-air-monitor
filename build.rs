@@ -14,6 +14,12 @@ fn main() {
     println!("cargo:rerun-if-env-changed=OTA_BASE_URL");
     println!("cargo:rerun-if-env-changed=WIFI_SSID");
     println!("cargo:rerun-if-env-changed=WIFI_PASS");
+    println!("cargo:rerun-if-env-changed=MQTT_HOST");
+    println!("cargo:rerun-if-env-changed=MQTT_PORT");
+    println!("cargo:rerun-if-env-changed=MQTT_USER");
+    println!("cargo:rerun-if-env-changed=MQTT_PASS");
+    println!("cargo:rerun-if-env-changed=MQTT_CLIENT_ID");
+    println!("cargo:rerun-if-env-changed=MQTT_PREFIX");
 
     let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let build_file = manifest_dir.join("scripts").join("build-number.txt");
